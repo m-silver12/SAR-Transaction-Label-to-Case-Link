@@ -21,9 +21,24 @@ money movements and eligible investigation cases.
 
 ## Strict reconstruction and direct case attribution
 
-`models/04_strict_label_reconstruction_case_attribution.sql` is a separate
-evidence-layer prototype. It strengthens the original interval reconstruction
-before that evidence is used to build a replacement action fact.
+`models/04_strict_label_reconstruction_case_attribution_sample.sql` is a
+separate evidence-layer prototype. It strengthens the original interval
+reconstruction before that evidence is used to build a replacement action fact.
+
+The sandbox version is intentionally a deterministic 1/64 sample of
+transaction-label scopes observed in September 2026. It reads the complete
+available event history for those selected scopes, so reconstructed intervals
+are not truncated to September. The sampled output is materialized as
+`SANDBOX_DB.LIMITED_SANDBOX_FINCRIME_ANALYTICS.SAR_LABEL_RECONSTRUCTION_CASE_ATTRIBUTION_SAMPLE`.
+The full supported source currently contains roughly 243 million events, so a
+full-history version needs an incremental or staged production design rather
+than this proof-of-concept CTAS.
+
+The September sample build produced 285,859 interval/unresolved rows across
+273,877 lifecycle keys. The validation query found no duplicate non-null
+interval keys and no lifecycle with more than one currently active interval.
+Run `analysis/validate_strict_label_reconstruction_case_attribution_sample.sql`
+after rebuilding the sample.
 
 The model:
 

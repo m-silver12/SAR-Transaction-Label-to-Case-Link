@@ -13,10 +13,46 @@
 --   It is not presented as the original label-creation timestamp. DELETE-first
 --   histories keep a null start because no defensible start date is available.
 --
+-- Validation scope:
+--   transaction-label scopes observed during September 2026, sampled
+--   deterministically to 1/64 using the natural transaction-label scope key.
+--   After selecting those scopes, the model reads all available events for each
+--   selected scope so their reconstructed intervals are not truncated to the
+--   September observation window.
+--
 create or replace table
-    sandbox_db.limited_sandbox_fincrime_analytics.sar_label_reconstruction_case_attribution
+    sandbox_db.limited_sandbox_fincrime_analytics.sar_label_reconstruction_case_attribution_sample
 as
-with label_events_source as (
+with validation_scopes as (
+    select distinct
+        label_change_log.owner_entity_id,
+        label_change_log.owner_entity_type,
+        label_change_log.entity_id,
+        label_change_log.entity_type,
+        label_change_log.team
+    from analytics_db.fincrime_label.label_change_log
+    where label_change_log.team = 'AML'
+        and label_change_log.owner_entity_type = 'PROFILE'
+        and label_change_log.entity_type in (
+            'TRANSFER',
+            'CARD_TRANSACTION',
+            'DIRECT_DEBIT_TRANSACTION'
+        )
+        and label_change_log.created_at >= '2026-09-01'
+        and label_change_log.created_at < '2026-10-01'
+        and bitand(
+            hash(
+                label_change_log.owner_entity_id,
+                label_change_log.owner_entity_type,
+                label_change_log.entity_id,
+                label_change_log.entity_type,
+                label_change_log.team
+            ),
+            63
+        ) = 0
+),
+
+label_events_source as (
     select
         label_change_log.id as label_change_log_id,
         label_change_log.owner_entity_id,
@@ -31,6 +67,14 @@ with label_events_source as (
         label_change_log.created_at as event_at,
         label_change_log._sdc_batched_at
     from analytics_db.fincrime_label.label_change_log
+    inner join validation_scopes
+        on validation_scopes.owner_entity_id
+            = label_change_log.owner_entity_id
+        and validation_scopes.owner_entity_type
+            = label_change_log.owner_entity_type
+        and validation_scopes.entity_id = label_change_log.entity_id
+        and validation_scopes.entity_type = label_change_log.entity_type
+        and validation_scopes.team = label_change_log.team
     where label_change_log.team = 'AML'
         and label_change_log.owner_entity_type = 'PROFILE'
         and label_change_log.entity_type in (
@@ -107,6 +151,12 @@ scope_diagnostics as (
         count_if(ordered_events.event_type = 'INSERT') as insert_event_count,
         count_if(ordered_events.event_type = 'DELETE') as delete_event_count,
         count_if(ordered_events.event_type = 'UPDATE') as update_event_count,
+        count_if(ordered_events.event_at is null)
+            as null_event_timestamp_count,
+        count_if(
+            ordered_events.event_type = 'UPDATE'
+            and ordered_events.active_label_count_after_event != 1
+        ) as invalid_update_context_count,
         min_by(ordered_events.event_type, ordered_events.event_sequence)
             as first_event_type,
         max(ordered_events.active_label_count_after_event)
@@ -125,12 +175,15 @@ classified_scopes as (
     select
         scope_diagnostics.*,
         case
-            when scope_diagnostics.first_event_type != 'INSERT'
+            when scope_diagnostics.null_event_timestamp_count > 0
+                or scope_diagnostics.first_event_type != 'INSERT'
                 or scope_diagnostics.min_active_label_count_before_event < 0
                 then 'INCOMPLETE_HISTORY'
             when scope_diagnostics.max_active_label_count_after_event > 1
                 and scope_diagnostics.update_event_count > 0
                 then 'AMBIGUOUS_PARALLEL_UPDATE'
+            when scope_diagnostics.invalid_update_context_count > 0
+                then 'INCOMPLETE_HISTORY'
             when scope_diagnostics.max_active_label_count_after_event > 1
                 then 'EXACT_PARALLEL_NO_UPDATE'
             else 'EXACT_SINGLE_ACTIVE_LABEL'
@@ -143,6 +196,7 @@ events_with_status as (
         ordered_events.*,
         classified_scopes.first_event_type,
         classified_scopes.insert_event_count,
+        classified_scopes.null_event_timestamp_count,
         classified_scopes.reconstruction_status
     from ordered_events
     inner join classified_scopes
@@ -240,6 +294,7 @@ left_censored_events as (
     where events_with_status.reconstruction_status = 'INCOMPLETE_HISTORY'
         and events_with_status.first_event_type = 'UPDATE'
         and events_with_status.insert_event_count = 0
+        and events_with_status.null_event_timestamp_count = 0
 ),
 
 meaningful_left_censored_events as (
@@ -653,6 +708,7 @@ unresolved_scopes as (
             classified_scopes.reconstruction_status = 'INCOMPLETE_HISTORY'
             and classified_scopes.first_event_type = 'UPDATE'
             and classified_scopes.insert_event_count = 0
+            and classified_scopes.null_event_timestamp_count = 0
         )
 ),
 
