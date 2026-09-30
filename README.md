@@ -9,15 +9,49 @@ money movements and eligible investigation cases.
    label value was active. An UPDATE ends the previous label value and starts the
    updated value, but the 90-day SAR-value calculation continues to use the original
    label insertion date.
-3. `models/02_sar_label_investigation_base.sql` maps transfer, card and direct-debit
+2. `models/02_sar_label_investigation_base.sql` maps transfer, card and direct-debit
    entity IDs to `money_movement_id`, takes the transaction owner from
    `MONEY_MOVEMENT_CORE.profile_id`, and links cases using a active interval.
-4. `models/03_sar_action_fact.sql` produces one row per `money_movement_id` for the
+3. `models/03_sar_action_fact.sql` produces one row per `money_movement_id` for the
    SAR-value numerator, preventing transaction value from being counted once per
    label or case.
-5. `analysis/compare_mature_sar_value.sql` compares the action fact with
+4. `analysis/compare_mature_sar_value.sql` compares the action fact with
    `RISK_SAR_VALUE_RATE_KRI_AGGREGATION` for the mature window used in the August
    2026 validation: `[2025-01-01, 2026-05-03)`.
+
+## Strict reconstruction and direct case attribution
+
+`models/04_strict_label_reconstruction_case_attribution.sql` is a separate
+evidence-layer prototype. It strengthens the original interval reconstruction
+before that evidence is used to build a replacement action fact.
+
+The model:
+
+- distinguishes safely reconstructed histories from ambiguous ones;
+- supports simultaneous labels when there are no UPDATE events;
+- retains UPDATE-first histories as left-censored rather than presenting the
+  first observed UPDATE as the original creation time;
+- recovers the current immutable `FINCRIME_LABELS.ID` where possible;
+- adds retained `AML_RISK.FINCRIME_LABEL` case associations without fanning out
+  the interval grain; and
+- identifies a candidate origin case only when exactly one retained direct case
+  association was created on the observed INSERT date.
+
+The reconstruction statuses are:
+
+| Status | Meaning |
+| --- | --- |
+| `EXACT_SINGLE_ACTIVE_LABEL` | The event stream has at most one active label and can be reconstructed deterministically. |
+| `EXACT_PARALLEL_NO_UPDATE` | Multiple labels coexist, but INSERT and DELETE events can be paired by label value. |
+| `LEFT_CENSORED_UPDATE_START` | The history begins with UPDATE; the first observed UPDATE is an observed start, not proven creation. |
+| `AMBIGUOUS_PARALLEL_UPDATE` | An UPDATE occurs while several labels coexist and the log does not identify which immutable label changed. |
+| `INCOMPLETE_HISTORY` | The available events do not provide a defensible interval history. |
+
+This model does not yet apply the 90-day SAR-value rule, map raw label entities
+to `money_movement_id`, or select a canonical reporting case. Those should be
+applied downstream after the reporting timestamp contract is agreed. Current
+label state is retained for audit; historical eligibility should use the label
+value active interval at the agreed reporting timestamp.
 
 ## Important notes
 
